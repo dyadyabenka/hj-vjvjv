@@ -20,6 +20,8 @@ sources:
     url: "http://postnauka.ru/feed"
   - name: "Элементы.ру"
     url: "https://elementy.ru/rss/news"
+  - name: "Habr / Биотехнологии"
+    url: "https://habr.com/ru/rss/hub/biotech/all/?fl=ru"
 
 # Сбор статей
 fetch:
@@ -48,6 +50,16 @@ fetch:
     - "дисбактериоз"
     - "глист"
     - "инвази"
+    - "бактери"
+    - "иммунитет"
+    - "иммунн"
+    - "вирус"
+    - "инфекц"
+    - "микроб"
+    - "антибиотик"
+    - "пищеварен"
+    - "жкт"
+    - "простейш"
 
 # Группировка статей по темам
 clustering:
