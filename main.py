@@ -23,6 +23,7 @@ from telegram import Update
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
+    CommandHandler,
     ContextTypes,
     MessageHandler,
     filters,
@@ -286,14 +287,20 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             if ok:
                 storage.mark_post_published(post_id)
                 log.info("Пост %d опубликован в канал %s", post_id, channel_cfg["id"])
+                try:
+                    await query.edit_message_reply_markup(reply_markup=None)
+                except Exception:  # noqa: BLE001 — не критично, если разметку не убрать
+                    pass
             else:
+                # Публикация не удалась — пост остаётся pending_review, кнопки
+                # НЕ убираем, чтобы можно было нажать "Опубликовать" ещё раз
+                # после починки причины (например, бот не был админом канала).
                 await publisher.notify(
-                    context.bot, admin_id, f"Не удалось опубликовать пост {post_id}, смотри лог."
+                    context.bot,
+                    admin_id,
+                    f"Не удалось опубликовать пост {post_id}, смотри лог. "
+                    f"Кнопки оставил — попробуй ещё раз после починки.",
                 )
-            try:
-                await query.edit_message_reply_markup(reply_markup=None)
-            except Exception:  # noqa: BLE001 — не критично, если разметку не убрать
-                pass
 
         elif action == "edit":
             context.bot_data["awaiting_edit_post_id"] = post_id
@@ -353,6 +360,35 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         )
 
 
+async def handle_pending_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/pending — заново присылает все черновики, ещё ждущие решения, с кнопками.
+
+    Полезно, если кнопки под исходным сообщением в Telegram пропали
+    (например, сообщение потерялось, либо сработал старый баг, когда кнопки
+    убирались даже при неудачной публикации).
+    """
+    admin_id = context.bot_data["secrets"]["TELEGRAM_ADMIN_ID"]
+    if str(update.effective_chat.id) != str(admin_id):
+        return
+
+    config = context.bot_data["config"]
+    db_path = context.bot_data["db_path"]
+
+    with Storage(db_path) as storage:
+        pending = storage.get_pending_posts()
+
+    if not pending:
+        await publisher.notify(context.bot, admin_id, "Черновиков, ждущих решения, нет.")
+        return
+
+    for post in pending:
+        channel_cfg = get_channel(config, post["channel_id"])
+        channel_name = channel_cfg["name"] if channel_cfg else post["channel_id"]
+        await publisher.send_draft(
+            context.bot, admin_id, post["id"], channel_name, post["text"], post["image_url"]
+        )
+
+
 async def on_startup(application: Application) -> None:
     log.info("Бот запущен, жду планового прогона и модерации")
 
@@ -368,6 +404,7 @@ def run_forever(config: dict, secrets: dict, db_path: str) -> None:
     application.bot_data["synthesizer"] = Synthesizer(config, secrets["LLM_API_KEY"])
     application.bot_data["awaiting_edit_post_id"] = None
 
+    application.add_handler(CommandHandler("pending", handle_pending_command))
     application.add_handler(CallbackQueryHandler(handle_callback))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
