@@ -1,0 +1,194 @@
+# ---------------------------------------------------------------------------
+# Настройки бота. Секретов здесь нет — они лежат в .env
+# ---------------------------------------------------------------------------
+
+# Один бот, несколько каналов. Каждый прогон конвейера обходит все каналы
+# по очереди: свои источники, свои ключевые слова, своя тема для промпта,
+# свой канал публикации (id переменной окружения с TELEGRAM_CHANNEL_ID
+# смотри в .env.example). Черновик, который уходит тебе на модерацию,
+# всегда подписан, к какому каналу он относится.
+channels:
+  - id: "parasites"
+    name: "Паразитология и микробиом"
+    channel_id_env: "TELEGRAM_CHANNEL_ID_PARASITES"
+    topic: "Паразитология, микрофлора кишечника и пробиотики: научно обоснованная информация"
+    keywords:
+      - "паразит"
+      - "гельминт"
+      - "микробиом"
+      - "микрофлор"
+      - "кишечн"
+      - "пробиотик"
+      - "лактобактер"
+      - "бифидобактер"
+      - "дисбактериоз"
+      - "глист"
+      - "инвази"
+      - "бактери"
+      - "иммунитет"
+      - "иммунн"
+      - "вирус"
+      - "инфекц"
+      - "микроб"
+      - "антибиотик"
+      - "пищеварен"
+      - "жкт"
+      - "простейш"
+    sources:
+      - name: "N+1 / Медицина"
+        url: "https://nplus1.ru/rss"
+      - name: "Наука и жизнь"
+        url: "https://www.nkj.ru/rss/"
+      - name: "Naked Science"
+        url: "https://naked-science.ru/feedrss.xml"
+      - name: "ПостНаука"
+        url: "http://postnauka.ru/feed"
+      - name: "Элементы.ру"
+        url: "https://elementy.ru/rss/news"
+      - name: "Habr / Биотехнологии"
+        url: "https://habr.com/ru/rss/hub/biotech/all/?fl=ru"
+    fallback_image_queries:
+      - "science laboratory research"
+      - "gut microbiome bacteria"
+      - "medical research microscope"
+
+  - id: "sleep"
+    name: "Наука о сне"
+    channel_id_env: "TELEGRAM_CHANNEL_ID_SLEEP"
+    topic: "Наука о сне: исследования, циркадные ритмы, качество и гигиена сна"
+    keywords:
+      - "сон"
+      - "бессонниц"
+      - "циркадн"
+      - "мелатонин"
+      - "засыпан"
+      - "просыпа"
+      - "недосып"
+      - "сновиден"
+      - "рем-фаз"
+      - "быстрый сон"
+      - "медленный сон"
+    # Источники те же научпоп-издания — про сон они пишут регулярно
+    sources:
+      - name: "N+1 / Наука"
+        url: "https://nplus1.ru/rss"
+      - name: "Наука и жизнь"
+        url: "https://www.nkj.ru/rss/"
+      - name: "Naked Science"
+        url: "https://naked-science.ru/feedrss.xml"
+      - name: "ПостНаука"
+        url: "http://postnauka.ru/feed"
+    fallback_image_queries:
+      - "sleep science bedroom night"
+      - "person sleeping peaceful"
+      - "circadian rhythm clock night"
+
+  - id: "nutrition"
+    name: "Питание и нутрициология"
+    channel_id_env: "TELEGRAM_CHANNEL_ID_NUTRITION"
+    topic: "Питание и нутрициология: научные исследования о еде, диетах и добавках"
+    keywords:
+      - "питани"
+      - "диет"
+      - "витамин"
+      - "нутриент"
+      - "калори"
+      - "белк"
+      - "жиры"
+      - "углевод"
+      - "рацион"
+      - "добавк"
+      - "сахар"
+      - "клетчатк"
+    sources:
+      - name: "N+1 / Наука"
+        url: "https://nplus1.ru/rss"
+      - name: "Наука и жизнь"
+        url: "https://www.nkj.ru/rss/"
+      - name: "Naked Science"
+        url: "https://naked-science.ru/feedrss.xml"
+      - name: "ПостНаука"
+        url: "http://postnauka.ru/feed"
+    fallback_image_queries:
+      - "healthy food nutrition science"
+      - "fruits vegetables table"
+      - "diet research laboratory"
+
+  - id: "crypto"
+    name: "Криптовалюты"
+    channel_id_env: "TELEGRAM_CHANNEL_ID_CRYPTO"
+    topic: "Новости криптовалют и блокчейна: биткоин, альткоины, регулирование, рынок"
+    keywords:
+      - "биткоин"
+      - "bitcoin"
+      - "крипто"
+      - "блокчейн"
+      - "эфириум"
+      - "ethereum"
+      - "альткоин"
+      - "токен"
+      - "майнинг"
+      - "биржа"
+      - "defi"
+      - "nft"
+      - "стейблкоин"
+      - "web3"
+    sources:
+      - name: "ForkLog"
+        url: "https://forklog.com/feed"
+      - name: "Cointelegraph"
+        url: "https://cointelegraph.com/rss"
+    fallback_image_queries:
+      - "cryptocurrency bitcoin blockchain"
+      - "digital finance technology"
+      - "crypto trading chart"
+
+# Общие настройки сбора статей — действуют одинаково для всех каналов выше
+fetch:
+  # Статьи старше этого возраста считаются "устаревшими" и не берутся в новые.
+  max_age_hours: 720  # 30 дней. Для крипты можно сделать отдельно короче
+                       # (см. примечание в README), пока общий срок для всех.
+  # Сколько статей брать максимум из одной ленты (ленты бывают очень длинные)
+  max_articles_per_source: 40
+  # До скольки символов обрезать описание статьи (экономия токенов)
+  description_max_chars: 1200
+  # Таймаут загрузки одной ленты, секунды
+  timeout_seconds: 20
+
+# Группировка статей по темам (общая логика для всех каналов)
+clustering:
+  # Порог косинусного сходства TF-IDF (0..1). Больше — кластеры мельче и
+  # точнее, меньше — крупнее и "грязнее". Разумный диапазон: 0.20-0.35
+  similarity_threshold: 0.25
+  # Больше этого числа статей в один пост не отдаём (экономия токенов)
+  max_articles_per_cluster: 6
+
+# Синтез поста через LLM (один провайдер/модель на все каналы)
+synthesis:
+  # Провайдер: "anthropic" или "deepseek".
+  provider: "deepseek"
+  model: "deepseek-v4-flash"
+  max_tokens: 2000
+  # Сколько постов создавать за один запуск НА КАЖДЫЙ канал (защита от спама)
+  max_posts_per_run: 2
+
+# Публикация в Telegram
+publishing:
+  disable_web_page_preview: true
+
+# Как часто прогонять конвейер (для всех каналов сразу, за один прогон)
+run:
+  interval_hours: 4
+
+# Картинки к постам (реальные фото по теме, через Pexels API).
+# fallback_image_queries у каждого канала — свои (см. выше), это поле —
+# запасной вариант, если у канала он почему-то не задан.
+images:
+  provider: "pexels"
+  fallback_queries:
+    - "science laboratory research"
+
+# Хранилище (общая база для всех каналов — статьи и посты различаются
+# по полю channel_id)
+storage:
+  db_path: "articles.db"
