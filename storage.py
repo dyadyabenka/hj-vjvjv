@@ -270,6 +270,21 @@ class Storage:
         post["article_urls"] = json.loads(post["article_urls"])
         return post
 
+    def get_pending_posts(self) -> list[dict]:
+        """Все черновики, ещё ждущие решения (не опубликованы и не отменены).
+
+        Нужно для команды /pending — переслать их заново с кнопками, если
+        кнопки под исходным сообщением в Telegram почему-то пропали
+        (например, из-за прежнего бага при неудачной публикации).
+        """
+        rows = self.conn.execute(
+            "SELECT * FROM posts WHERE status = ? ORDER BY id", (POST_PENDING,)
+        ).fetchall()
+        posts = [dict(row) for row in rows]
+        for post in posts:
+            post["article_urls"] = json.loads(post["article_urls"])
+        return posts
+
     def update_post_text(self, post_id: int, text: str) -> None:
         self.conn.execute("UPDATE posts SET text = ? WHERE id = ?", (text, post_id))
         self.conn.commit()
