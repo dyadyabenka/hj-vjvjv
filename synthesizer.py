@@ -24,13 +24,13 @@ DEEPSEEK_BASE_URL = "https://api.deepseek.com/anthropic"
 SUPPORTED_PROVIDERS = ("anthropic", "deepseek")
 
 SYNTHESIS_PROMPT_TEMPLATE = """Ты — редактор научно-популярного Telegram-канала на тему: {topic}.
-
+{examples_block}
 Вот несколько статей по одной теме из разных источников:
 
 {articles}
 
 Задача:
-1. Напиши связный пост (150-300 слов) своими словами, объединяющий факты из всех источников.
+1. Напиши связный пост своими словами, объединяющий факты из всех источников.
 2. НЕ копируй формулировки дословно — только пересказ своими словами.
 3. Если источники расходятся в фактах или оценках — отметь это явно ("по разным данным...").
 4. Тема медицинская — будь особенно аккуратен: не давай прямых рекомендаций
@@ -47,11 +47,13 @@ SYNTHESIS_PROMPT_TEMPLATE = """Ты — редактор научно-попул
    ссылки и блок "Источники" — пост должен читаться как самостоятельный
    авторский текст, без ссылок на то, откуда взята информация.
 10. Пиши по-русски, даже если исходные статьи на английском.
+11. По объёму, структуре и балансу конкретики/общих фраз ориентируйся на
+    примеры выше (если они даны) — не на фиксированное число слов.
 
 Формат ответа: только готовый текст поста, без пояснений от себя."""
 
 REVISE_PROMPT_TEMPLATE = """Ты — редактор научно-популярного Telegram-канала на тему: {topic}.
-
+{examples_block}
 Вот исходные статьи, на основе которых написан пост:
 
 {articles}
@@ -74,9 +76,53 @@ REVISE_PROMPT_TEMPLATE = """Ты — редактор научно-популя�
 - 2-4 emoji по тексту к месту, без перебора
 - НЕ упоминай названия источников/изданий и не добавляй ссылки или блок
   "Источники" — пост должен выглядеть как самостоятельный авторский текст
+- по объёму и стилю ориентируйся на примеры выше (если они даны)
 - по-русски
 
 Формат ответа: только готовый текст поста, без пояснений от себя."""
+
+
+VERIFY_PROMPT_TEMPLATE = """Ты — придирчивый редактор-проверяющий научно-популярного Telegram-канала.
+Твоя задача — не переписывать пост, а только критически проверить его.
+
+Вот статьи-источники:
+
+{articles}
+
+Вот готовый пост, написанный на их основе:
+
+---
+{post}
+---
+
+Проверь по трём пунктам:
+1. Есть ли в посте факты, цифры или утверждения, которых нет в статьях-источниках
+   (то есть модель их выдумала)?
+2. Есть ли в тексте логические противоречия, бессмыслица или нестыковки?
+3. Выдаётся ли предположение или единичное исследование за доказанный,
+   общепринятый факт?
+
+Если проблем нет — ответь ровно одним словом: OK
+Если есть хотя бы одна проблема — опиши её по-русски в 1-2 коротких
+предложениях, без слова OK и без лишних вступлений."""
+
+
+def build_examples_block(examples: list[str] | None) -> str:
+    """Форматирует примеры постов для промпта. Пустая строка, если примеров нет —
+    тогда в шаблоне на этом месте просто ничего не появится.
+    """
+    if not examples:
+        return ""
+
+    formatted = "\n\n".join(
+        f"--- Пример {i} ---\n{example.strip()}" for i, example in enumerate(examples, start=1)
+    )
+    return (
+        f"\nВот примеры постов в желаемом стиле — ориентируйся на них по объёму, "
+        f"структуре, тону и соотношению конкретики и общих фраз (сама тема примеров "
+        f"может отличаться от текущей статьи, важен именно стиль подачи):\n\n"
+        f"{formatted}\n"
+    )
 
 
 def build_articles_block(cluster: list[Article]) -> str:
@@ -116,29 +162,55 @@ class Synthesizer:
 
         log.info("Синтезатор: провайдер=%s, модель=%s", self.provider, self.model)
 
-    def synthesize(self, cluster: list[Article], topic: str) -> tuple[str, str] | None:
+    def synthesize(self, cluster: list[Article], topic: str, examples: list[str] | None = None) -> tuple[str, str] | None:
         """Первый черновик поста из группы статей для канала с темой topic.
+
+        examples — список готовых постов-образцов (channels[].style_examples
+        в config.yaml), по которым модель ориентируется на объём и стиль
+        вместо жёсткого лимита слов.
 
         Возвращает (текст_поста, articles_block) или None при ошибке.
         articles_block нужно сохранить в storage — он понадобится revise().
         """
         articles_block = build_articles_block(cluster)
-        prompt = SYNTHESIS_PROMPT_TEMPLATE.format(topic=topic, articles=articles_block)
+        prompt = SYNTHESIS_PROMPT_TEMPLATE.format(
+            topic=topic, articles=articles_block, examples_block=build_examples_block(examples)
+        )
 
         text = self._complete(prompt)
         if text is None:
             return None
         return text, articles_block
 
-    def revise(self, articles_block: str, previous_post: str, edit_note: str, topic: str) -> str | None:
+    def revise(
+        self, articles_block: str, previous_post: str, edit_note: str, topic: str, examples: list[str] | None = None
+    ) -> str | None:
         """Переписывает пост с учётом замечаний админа. Возвращает новый текст или None."""
         prompt = REVISE_PROMPT_TEMPLATE.format(
             topic=topic,
             articles=articles_block,
             previous_post=previous_post,
             edit_note=edit_note,
+            examples_block=build_examples_block(examples),
         )
         return self._complete(prompt)
+
+    def verify(self, articles_block: str, post_text: str) -> str | None:
+        """Критическая самопроверка готового поста ("второе мнение" той же модели).
+
+        Возвращает None в двух разных случаях, которые вызывающий код не
+        различает и трактует одинаково — "замечаний нет, публикуем как есть":
+        либо модель ответила "OK", либо сам вызов API не удался (проверка
+        необязательная — её сбой не должен блокировать публикацию).
+        Если найдена проблема — возвращает короткое текстовое замечание.
+        """
+        prompt = VERIFY_PROMPT_TEMPLATE.format(articles=articles_block, post=post_text)
+        result = self._complete(prompt)
+        if result is None:
+            return None
+        if result.strip().upper().startswith("OK"):
+            return None
+        return result.strip()
 
     def _complete(self, prompt: str) -> str | None:
         """Общая логика вызова модели и разбора ответа — используется и synthesize, и revise."""

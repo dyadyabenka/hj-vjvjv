@@ -105,3 +105,30 @@ def rank_clusters(clusters: list[list[Article]]) -> list[list[Article]]:
         ),
         reverse=True,
     )
+
+
+def is_duplicate_of_recent(text: str, recent_texts: list[str], threshold: float) -> bool:
+    """True, если text слишком похож на один из недавно ОПУБЛИКОВАННЫХ постов.
+
+    Тот же принцип, что и в cluster_articles (символьные TF-IDF n-граммы),
+    но здесь сравнивается не заголовок статьи, а сам готовый текст поста —
+    защита от того, что похожая история всплывёт заново через недели и
+    сгенерирует по сути повторный пост в канале.
+    """
+    if not recent_texts:
+        return False
+
+    texts = [text, *recent_texts]
+    vectorizer = TfidfVectorizer(analyzer="char_wb", ngram_range=(3, 5), min_df=1, sublinear_tf=True)
+    try:
+        matrix = vectorizer.fit_transform(texts)
+    except ValueError:
+        return False
+
+    similarity = cosine_similarity(matrix[0:1], matrix[1:])[0]
+    best = float(similarity.max()) if len(similarity) else 0.0
+
+    if best >= threshold:
+        log.info("Пост похож на уже опубликованный (сходство %.2f >= %.2f) — пропускаем", best, threshold)
+        return True
+    return False

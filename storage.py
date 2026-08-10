@@ -53,11 +53,20 @@ CREATE TABLE IF NOT EXISTS posts (
     text          TEXT NOT NULL,
     image_url     TEXT,
     image_query   TEXT,
+    check_note    TEXT,  -- замечание от synthesizer.verify(), если проверка что-то нашла
     status        TEXT NOT NULL,
     created_at    TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_posts_status ON posts (status);
 CREATE INDEX IF NOT EXISTS idx_posts_channel ON posts (channel_id);
+
+CREATE TABLE IF NOT EXISTS style_examples (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    channel_id  TEXT NOT NULL,
+    text        TEXT NOT NULL,
+    created_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_style_examples_channel ON style_examples (channel_id);
 """
 
 _NON_WORD_RE = re.compile(r"[^\w\s]", re.UNICODE)
@@ -91,6 +100,21 @@ class Storage:
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(_SCHEMA)
         self.conn.commit()
+        self._migrate()
+
+    def _migrate(self) -> None:
+        """Добавляет колонки, которых не было в более старой версии базы.
+
+        CREATE TABLE IF NOT EXISTS не трогает уже существующую таблицу, так
+        что новые поля в posts (например, check_note) нужно добавлять руками
+        для баз, созданных до этого изменения. Ошибка "duplicate column"
+        означает, что колонка уже есть — это нормальный случай, не проблема.
+        """
+        try:
+            self.conn.execute("ALTER TABLE posts ADD COLUMN check_note TEXT")
+            self.conn.commit()
+        except sqlite3.OperationalError:
+            pass  # колонка уже существует
 
     # --- контекстный менеджер -------------------------------------------------
 
@@ -237,14 +261,15 @@ class Storage:
         text: str,
         image_url: str | None,
         image_query: str | None,
+        check_note: str | None = None,
     ) -> int:
         """Сохраняет черновик поста со статусом pending_review. Возвращает id поста."""
         cursor = self.conn.execute(
             """
             INSERT INTO posts
                 (channel_id, article_urls, articles_block, text, image_url, image_query,
-                 status, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                 check_note, status, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 channel_id,
@@ -253,6 +278,7 @@ class Storage:
                 text,
                 image_url,
                 image_query,
+                check_note,
                 POST_PENDING,
                 _to_db(datetime.now(timezone.utc)),
             ),
@@ -286,7 +312,13 @@ class Storage:
         return posts
 
     def update_post_text(self, post_id: int, text: str) -> None:
-        self.conn.execute("UPDATE posts SET text = ? WHERE id = ?", (text, post_id))
+        """Обновляет текст поста после доработки. check_note сбрасывается —
+        замечание относилось к прежнему тексту, оставлять его при новом
+        варианте было бы вводящей в заблуждение "залежавшейся" пометкой.
+        """
+        self.conn.execute(
+            "UPDATE posts SET text = ?, check_note = NULL WHERE id = ?", (text, post_id)
+        )
         self.conn.commit()
 
     def update_post_image(self, post_id: int, image_url: str | None, image_query: str | None) -> None:
@@ -317,6 +349,21 @@ class Storage:
         )
         self.conn.commit()
 
+    def get_recent_published_texts(self, channel_id: str, days: int) -> list[str]:
+        """Тексты постов этого канала, опубликованных за последние days дней.
+
+        Нужно для проверки на повтор темы (clusterer.is_duplicate_of_recent) —
+        сравниваем новый черновик с недавней историей публикаций, а не со
+        всей историей канала, иначе со временем темы неизбежно повторятся
+        (например, раз в год снова пишут про то же исследование).
+        """
+        cutoff = _to_db(datetime.now(timezone.utc) - timedelta(days=days))
+        rows = self.conn.execute(
+            "SELECT text FROM posts WHERE channel_id = ? AND status = ? AND created_at >= ?",
+            (channel_id, POST_PUBLISHED, cutoff),
+        ).fetchall()
+        return [row["text"] for row in rows]
+
     def get_used_image_urls(self) -> set[str]:
         """Все image_url, что уже стоят у каких-либо постов (любого статуса).
 
@@ -328,3 +375,37 @@ class Storage:
             "SELECT DISTINCT image_url FROM posts WHERE image_url IS NOT NULL"
         ).fetchall()
         return {row["image_url"] for row in rows}
+
+    # --- примеры постов для стиля (channels[].style_examples из бота) --------
+
+    def add_style_example(self, channel_id: str, text: str) -> int:
+        """Сохраняет присланный админом пост-образец для канала. Возвращает id."""
+        cursor = self.conn.execute(
+            "INSERT INTO style_examples (channel_id, text, created_at) VALUES (?, ?, ?)",
+            (channel_id, text, _to_db(datetime.now(timezone.utc))),
+        )
+        self.conn.commit()
+        return cursor.lastrowid
+
+    def get_style_examples(self, channel_id: str) -> list[str]:
+        """Все сохранённые примеры для канала, от старых к новым."""
+        rows = self.conn.execute(
+            "SELECT text FROM style_examples WHERE channel_id = ? ORDER BY id",
+            (channel_id,),
+        ).fetchall()
+        return [row["text"] for row in rows]
+
+    def count_style_examples(self) -> dict[str, int]:
+        """Сколько примеров сохранено на каждый канал — для команды /examples."""
+        rows = self.conn.execute(
+            "SELECT channel_id, COUNT(*) AS count FROM style_examples GROUP BY channel_id"
+        ).fetchall()
+        return {row["channel_id"]: row["count"] for row in rows}
+
+    def clear_style_examples(self, channel_id: str) -> int:
+        """Удаляет все примеры канала. Возвращает, сколько удалено."""
+        cursor = self.conn.execute(
+            "DELETE FROM style_examples WHERE channel_id = ?", (channel_id,)
+        )
+        self.conn.commit()
+        return cursor.rowcount

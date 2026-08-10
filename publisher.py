@@ -89,15 +89,22 @@ async def send_draft(
     channel_name: str,
     text: str,
     image_url: str | None,
+    check_note: str | None = None,
 ) -> bool:
     """Отправляет черновик поста админу в личку с кнопками approve/edit.
 
     channel_name подписывается отдельной строкой над постом, чтобы было видно,
     в какой из нескольких каналов уйдёт публикация при нажатии "Опубликовать".
+    check_note (если есть) — замечание от автоматической проверки
+    (synthesizer.verify), показывается отдельной строкой с предупреждением;
+    сам пост при этом всё равно приходит на модерацию, а не блокируется.
 
     Возвращает True, если сообщение (хотя бы часть) успешно доставлено.
     """
-    label = f"📌 Канал: <b>{html.escape(channel_name)}</b>\n\n"
+    label = f"📌 Канал: <b>{html.escape(channel_name)}</b>\n"
+    if check_note:
+        label += f"⚠️ Проверка: <i>{html.escape(check_note)}</i>\n"
+    label += "\n"
     html_text = label + to_html(text)
     keyboard = _moderation_keyboard(post_id)
 

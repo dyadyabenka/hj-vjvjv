@@ -31,7 +31,7 @@ from telegram.ext import (
 
 import images
 import publisher
-from clusterer import cluster_articles, rank_clusters
+from clusterer import cluster_articles, is_duplicate_of_recent, rank_clusters
 from fetcher import fetch_for_channel
 from storage import Storage
 from synthesizer import Synthesizer
@@ -70,6 +70,16 @@ def get_channel(config: dict, channel_id: str) -> dict | None:
         if channel["id"] == channel_id:
             return channel
     return None
+
+
+def get_channel_examples(config: dict, storage: Storage, channel_id: str) -> list[str]:
+    """Примеры стиля для канала: сначала заданные в config.yaml (если есть),
+    потом присланные через /example в базе — вместе, в этом порядке.
+    """
+    channel_cfg = get_channel(config, channel_id) or {}
+    yaml_examples = channel_cfg.get("style_examples") or []
+    db_examples = storage.get_style_examples(channel_id)
+    return [*yaml_examples, *db_examples]
 
 
 def read_secrets(config: dict, dry_run: bool) -> dict | None:
@@ -155,12 +165,46 @@ def prepare_drafts_for_channel(
         "fallback_queries"
     )
 
+    drafts: list[dict] = []
+    pexels_key = secrets.get("PEXELS_API_KEY", "")
+    fallback_queries = channel_cfg.get("fallback_image_queries") or config.get("images", {}).get(
+        "fallback_queries"
+    )
+
+    mod_cfg = config.get("moderation", {})
+    dup_days = mod_cfg.get("duplicate_check_days", 30)
+    dup_threshold = mod_cfg.get("duplicate_similarity_threshold", 0.35)
+    fact_check_on = mod_cfg.get("fact_check_enabled", True)
+
+    # Опубликованные ранее посты этого канала + те, что создадим в этом же
+    # прогоне — второе нужно, чтобы два похожих черновика за один прогон
+    # тоже не превратились в два почти одинаковых поста.
+    recent_texts = storage.get_recent_published_texts(channel_cfg["id"], dup_days)
+
     for index, cluster in enumerate(selected, start=1):
-        result = synthesizer.synthesize(cluster, channel_cfg["topic"])
+        result = synthesizer.synthesize(
+            cluster, channel_cfg["topic"],
+            examples=get_channel_examples(config, storage, channel_cfg["id"]),
+        )
         if result is None:
             log.warning("[%s] Группа %d: пост не создан, пропускаем", channel_cfg["id"], index)
             continue
         text, articles_block = result
+
+        if is_duplicate_of_recent(text, recent_texts, dup_threshold):
+            log.info(
+                "[%s] Группа %d: похоже на недавний пост, пропускаем черновик",
+                channel_cfg["id"], index,
+            )
+            storage.mark_processed([a.url for a in cluster])
+            continue
+        recent_texts.append(text)
+
+        check_note = None
+        if fact_check_on:
+            check_note = synthesizer.verify(articles_block, text)
+            if check_note:
+                log.info("[%s] Группа %d: проверка нашла замечание: %s", channel_cfg["id"], index, check_note)
 
         image_url = None
         image_query = None
@@ -179,6 +223,7 @@ def prepare_drafts_for_channel(
                 "articles_block": articles_block,
                 "image_url": image_url,
                 "image_query": image_query,
+                "check_note": check_note,
             }
         )
 
@@ -229,6 +274,7 @@ async def pipeline_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                 text=draft["text"],
                 image_url=draft["image_url"],
                 image_query=draft["image_query"],
+                check_note=draft.get("check_note"),
             )
             # Помечаем статьи как обработанные сразу, пока черновик ждёт
             # модерации — иначе они снова попадут в выборку в следующий
@@ -242,6 +288,7 @@ async def pipeline_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                 draft["channel_name"],
                 draft["text"],
                 draft["image_url"],
+                check_note=draft.get("check_note"),
             )
             log.info(
                 "[%s] Черновик поста %d отправлен админу на модерацию: %s",
@@ -320,9 +367,28 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Текстовое сообщение от админа — либо замечание к посту, либо игнор."""
+    """Текстовое сообщение от админа — пример стиля, замечание к посту, либо игнор."""
     admin_id = context.bot_data["secrets"]["TELEGRAM_ADMIN_ID"]
     if str(update.effective_chat.id) != str(admin_id):
+        return
+
+    # Ждём текст примера поста после команды /example <канал>?
+    example_channel_id = context.bot_data.get("awaiting_example_channel")
+    if example_channel_id is not None:
+        context.bot_data["awaiting_example_channel"] = None
+        example_text = (update.message.text or "").strip()
+        if not example_text:
+            return
+        db_path = context.bot_data["db_path"]
+        with Storage(db_path) as storage:
+            storage.add_style_example(example_channel_id, example_text)
+            total = len(storage.get_style_examples(example_channel_id))
+        channel_cfg = get_channel(context.bot_data["config"], example_channel_id)
+        channel_name = channel_cfg["name"] if channel_cfg else example_channel_id
+        await publisher.notify(
+            context.bot, admin_id,
+            f"Пример сохранён для канала «{channel_name}». Всего примеров у этого канала: {total}.",
+        )
         return
 
     post_id = context.bot_data.get("awaiting_edit_post_id")
@@ -347,7 +413,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         if channel_cfg is None:
             return
 
-        new_text = synthesizer.revise(post["articles_block"], post["text"], edit_note, channel_cfg["topic"])
+        new_text = synthesizer.revise(
+            post["articles_block"], post["text"], edit_note, channel_cfg["topic"],
+            examples=get_channel_examples(config, storage, channel_cfg["id"]),
+        )
         if new_text is None:
             await publisher.notify(
                 context.bot, admin_id, f"Не получилось переписать пост {post_id}, попробуй ещё раз."
@@ -358,6 +427,97 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await publisher.send_draft(
             context.bot, admin_id, post_id, channel_cfg["name"], new_text, post["image_url"]
         )
+
+
+def _channels_list_text(config: dict) -> str:
+    return "\n".join(f"• {ch['id']} — {ch['name']}" for ch in config["channels"])
+
+
+async def handle_example_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/example <id_канала> — далее следующим сообщением ждём текст примера поста."""
+    admin_id = context.bot_data["secrets"]["TELEGRAM_ADMIN_ID"]
+    if str(update.effective_chat.id) != str(admin_id):
+        return
+
+    config = context.bot_data["config"]
+    args = context.args or []
+
+    if not args:
+        await publisher.notify(
+            context.bot, admin_id,
+            "Использование: /example <id_канала>, затем следующим сообщением пришли текст "
+            "поста-примера.\n\nДоступные каналы:\n" + _channels_list_text(config),
+        )
+        return
+
+    channel_id = args[0].strip()
+    if get_channel(config, channel_id) is None:
+        await publisher.notify(
+            context.bot, admin_id,
+            f"Нет канала с id «{channel_id}». Доступные каналы:\n" + _channels_list_text(config),
+        )
+        return
+
+    context.bot_data["awaiting_example_channel"] = channel_id
+    channel_name = get_channel(config, channel_id)["name"]
+    await publisher.notify(
+        context.bot, admin_id,
+        f"Пришли текст поста-примера для канала «{channel_name}» следующим сообщением.",
+    )
+
+
+async def handle_examples_list_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/examples — сколько примеров сохранено на каждый канал."""
+    admin_id = context.bot_data["secrets"]["TELEGRAM_ADMIN_ID"]
+    if str(update.effective_chat.id) != str(admin_id):
+        return
+
+    config = context.bot_data["config"]
+    db_path = context.bot_data["db_path"]
+    with Storage(db_path) as storage:
+        counts = storage.count_style_examples()
+
+    lines = []
+    for ch in config["channels"]:
+        yaml_count = len(ch.get("style_examples") or [])
+        db_count = counts.get(ch["id"], 0)
+        lines.append(f"• {ch['id']} — {ch['name']}: {yaml_count + db_count} (из них через бота: {db_count})")
+
+    await publisher.notify(context.bot, admin_id, "Примеры по каналам:\n" + "\n".join(lines))
+
+
+async def handle_clear_examples_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/clear_examples <id_канала> — удаляет примеры, присланные через /example, для канала."""
+    admin_id = context.bot_data["secrets"]["TELEGRAM_ADMIN_ID"]
+    if str(update.effective_chat.id) != str(admin_id):
+        return
+
+    config = context.bot_data["config"]
+    args = context.args or []
+    if not args:
+        await publisher.notify(
+            context.bot, admin_id,
+            "Использование: /clear_examples <id_канала>\n\nДоступные каналы:\n" + _channels_list_text(config),
+        )
+        return
+
+    channel_id = args[0].strip()
+    if get_channel(config, channel_id) is None:
+        await publisher.notify(
+            context.bot, admin_id,
+            f"Нет канала с id «{channel_id}». Доступные каналы:\n" + _channels_list_text(config),
+        )
+        return
+
+    db_path = context.bot_data["db_path"]
+    with Storage(db_path) as storage:
+        removed = storage.clear_style_examples(channel_id)
+
+    await publisher.notify(
+        context.bot, admin_id,
+        f"Удалено примеров через бота: {removed}. "
+        f"Примеры, заданные в config.yaml (style_examples), это не затрагивает.",
+    )
 
 
 async def handle_pending_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -385,7 +545,8 @@ async def handle_pending_command(update: Update, context: ContextTypes.DEFAULT_T
         channel_cfg = get_channel(config, post["channel_id"])
         channel_name = channel_cfg["name"] if channel_cfg else post["channel_id"]
         await publisher.send_draft(
-            context.bot, admin_id, post["id"], channel_name, post["text"], post["image_url"]
+            context.bot, admin_id, post["id"], channel_name, post["text"], post["image_url"],
+            check_note=post.get("check_note"),
         )
 
 
@@ -403,8 +564,12 @@ def run_forever(config: dict, secrets: dict, db_path: str) -> None:
     application.bot_data["db_path"] = db_path
     application.bot_data["synthesizer"] = Synthesizer(config, secrets["LLM_API_KEY"])
     application.bot_data["awaiting_edit_post_id"] = None
+    application.bot_data["awaiting_example_channel"] = None
 
     application.add_handler(CommandHandler("pending", handle_pending_command))
+    application.add_handler(CommandHandler("example", handle_example_command))
+    application.add_handler(CommandHandler("examples", handle_examples_list_command))
+    application.add_handler(CommandHandler("clear_examples", handle_clear_examples_command))
     application.add_handler(CallbackQueryHandler(handle_callback))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
