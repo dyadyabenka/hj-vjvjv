@@ -165,12 +165,6 @@ def prepare_drafts_for_channel(
         "fallback_queries"
     )
 
-    drafts: list[dict] = []
-    pexels_key = secrets.get("PEXELS_API_KEY", "")
-    fallback_queries = channel_cfg.get("fallback_image_queries") or config.get("images", {}).get(
-        "fallback_queries"
-    )
-
     mod_cfg = config.get("moderation", {})
     dup_days = mod_cfg.get("duplicate_check_days", 30)
     dup_threshold = mod_cfg.get("duplicate_similarity_threshold", 0.35)
@@ -200,11 +194,36 @@ def prepare_drafts_for_channel(
             continue
         recent_texts.append(text)
 
-        check_note = None
         if fact_check_on:
             check_note = synthesizer.verify(articles_block, text)
             if check_note:
-                log.info("[%s] Группа %d: проверка нашла замечание: %s", channel_cfg["id"], index, check_note)
+                # Проверка нашла проблему — сначала пробуем один раз
+                # исправить автоматически (та же логика, что у кнопки
+                # "Доработать", только замечание даёт не админ, а сама
+                # проверка), а не сразу тревожить тебя пометкой.
+                log.info(
+                    "[%s] Группа %d: проверка нашла проблему, пробую исправить: %s",
+                    channel_cfg["id"], index, check_note,
+                )
+                fixed = synthesizer.revise(
+                    articles_block, text,
+                    edit_note=f"Автоматическая проверка нашла проблему, исправь её: {check_note}",
+                    topic=channel_cfg["topic"],
+                    examples=get_channel_examples(config, storage, channel_cfg["id"]),
+                )
+                if fixed is not None:
+                    text = fixed
+                    check_note = synthesizer.verify(articles_block, text)
+
+                if check_note:
+                    # Проблема осталась и после исправления — не тратим
+                    # твоё время, просто отклоняем пост молча (видно в логе).
+                    log.warning(
+                        "[%s] Группа %d: проблема не устранилась, пост отклонён без показа админу: %s",
+                        channel_cfg["id"], index, check_note,
+                    )
+                    storage.mark_processed([a.url for a in cluster])
+                    continue
 
         image_url = None
         image_query = None
@@ -223,7 +242,6 @@ def prepare_drafts_for_channel(
                 "articles_block": articles_block,
                 "image_url": image_url,
                 "image_query": image_query,
-                "check_note": check_note,
             }
         )
 
