@@ -128,11 +128,21 @@ def fetch_source(name: str, url: str, cfg: dict, cutoff: datetime) -> list[Artic
 
 
 def _matches_keywords(article: Article, keywords: list[str]) -> bool:
-    """True, если заголовок или описание содержат хотя бы одно ключевое слово."""
+    """True, если заголовок или описание содержат хотя бы одно ключевое слово
+    НА ГРАНИЦЕ СЛОВА (не как случайную подстроку внутри другого слова).
+
+    Пример бага, который это чинит: слово "операционной" содержит подстроку
+    "рацион" (ключевое слово канала про питание), из-за чего статья вообще
+    не про еду могла пройти фильтр. \\b проверяет, что перед совпадением
+    либо начало строки, либо не-буквенный символ — то есть совпадение
+    начинается именно с начала слова (сама подстрока при этом всё ещё может
+    быть началом более длинного слова: "рацион" по-прежнему матчит "рациона",
+    "рационе" и т.п. — ловится только совпадение ВНУТРИ другого слова).
+    """
     if not keywords:
         return True
     haystack = f"{article.title} {article.summary}".lower()
-    return any(keyword.lower() in haystack for keyword in keywords)
+    return any(re.search(r"\b" + re.escape(keyword.lower()), haystack) for keyword in keywords)
 
 
 def fetch_for_channel(
