@@ -11,6 +11,7 @@ search_image() умеет пропускать уже использованны
 
 import logging
 import random
+import re
 
 import requests
 
@@ -96,7 +97,7 @@ def pick_query(article_title: str, fallback_queries: list[str]) -> str:
     """
     title_lower = article_title.lower()
     for keyword, query in _KEYWORD_TO_QUERY.items():
-        if keyword in title_lower:
+        if re.search(r"\b" + re.escape(keyword), title_lower):
             return query
 
     queries = fallback_queries or ["science laboratory research"]
