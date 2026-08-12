@@ -241,7 +241,10 @@ class Storage:
         keywords_lower = [k.lower() for k in keywords]
         return [
             a for a in articles
-            if any(k in f"{a.title} {a.summary}".lower() for k in keywords_lower)
+            if any(
+                re.search(r"\b" + re.escape(k), f"{a.title} {a.summary}".lower())
+                for k in keywords_lower
+            )
         ]
 
     def stats(self) -> dict[str, int]:
