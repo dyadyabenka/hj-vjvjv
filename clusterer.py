@@ -107,28 +107,73 @@ def rank_clusters(clusters: list[list[Article]]) -> list[list[Article]]:
     )
 
 
-def is_duplicate_of_recent(text: str, recent_texts: list[str], threshold: float) -> bool:
-    """True, если text слишком похож на один из недавно ОПУБЛИКОВАННЫХ постов.
+def _headline(text: str) -> str:
+    """Первая непустая строка поста — заголовок (у нас это всегда так по промпту)."""
+    for line in text.strip().split("\n"):
+        if line.strip():
+            return line.strip()
+    return ""
 
-    Тот же принцип, что и в cluster_articles (символьные TF-IDF n-граммы),
-    но здесь сравнивается не заголовок статьи, а сам готовый текст поста —
-    защита от того, что похожая история всплывёт заново через недели и
-    сгенерирует по сути повторный пост в канале.
+
+def _best_similarity(target: str, others: list[str]) -> float:
+    """Максимальное косинусное сходство target с любым из others (0.0, если не с чем)."""
+    candidates = [o for o in others if o.strip()]
+    if not target.strip() or not candidates:
+        return 0.0
+
+    vectorizer = TfidfVectorizer(analyzer="char_wb", ngram_range=(3, 5), min_df=1, sublinear_tf=True)
+    try:
+        matrix = vectorizer.fit_transform([target, *candidates])
+    except ValueError:
+        return 0.0
+
+    similarity = cosine_similarity(matrix[0:1], matrix[1:])[0]
+    return float(similarity.max()) if len(similarity) else 0.0
+
+
+def is_duplicate_of_recent(
+    text: str,
+    recent_texts: list[str],
+    threshold: float,
+    headline_threshold: float | None = None,
+) -> bool:
+    """True, если text повторяет по теме один из недавних постов канала.
+
+    Проверка идёт по двум признакам, и срабатывания любого достаточно:
+
+    1. Заголовок. Самый сильный сигнал: два поста об одном исследовании почти
+       всегда имеют очень похожие заголовки ("Космос ускоряет старение: что
+       показали мыши на МКС" и "Космос как ускоритель старения: что показали
+       мыши на МКС"), даже если тексты внутри написаны по-разному. Поэтому у
+       заголовков свой, более строгий порог.
+    2. Полный текст. Ловит случай, когда заголовки разошлись, но содержание
+       по сути то же самое.
     """
     if not recent_texts:
         return False
 
-    texts = [text, *recent_texts]
-    vectorizer = TfidfVectorizer(analyzer="char_wb", ngram_range=(3, 5), min_df=1, sublinear_tf=True)
-    try:
-        matrix = vectorizer.fit_transform(texts)
-    except ValueError:
-        return False
+    if headline_threshold is None:
+        headline_threshold = threshold
 
-    similarity = cosine_similarity(matrix[0:1], matrix[1:])[0]
-    best = float(similarity.max()) if len(similarity) else 0.0
-
-    if best >= threshold:
-        log.info("Пост похож на уже опубликованный (сходство %.2f >= %.2f) — пропускаем", best, threshold)
+    headline_best = _best_similarity(
+        _headline(text), [_headline(t) for t in recent_texts]
+    )
+    if headline_best >= headline_threshold:
+        log.info(
+            "Заголовок повторяет недавний пост (сходство %.2f >= %.2f) — пропускаем",
+            headline_best, headline_threshold,
+        )
         return True
+
+    body_best = _best_similarity(text, recent_texts)
+    if body_best >= threshold:
+        log.info(
+            "Текст похож на недавний пост (сходство %.2f >= %.2f) — пропускаем",
+            body_best, threshold,
+        )
+        return True
+
+    log.debug(
+        "Проверка на повтор пройдена (заголовок %.2f, текст %.2f)", headline_best, body_best
+    )
     return False
