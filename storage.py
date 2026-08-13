@@ -352,18 +352,21 @@ class Storage:
         )
         self.conn.commit()
 
-    def get_recent_published_texts(self, channel_id: str, days: int) -> list[str]:
-        """Тексты постов этого канала, опубликованных за последние days дней.
+    def get_recent_post_texts(self, channel_id: str, days: int) -> list[str]:
+        """Тексты ВСЕХ постов этого канала за последние days дней.
 
-        Нужно для проверки на повтор темы (clusterer.is_duplicate_of_recent) —
-        сравниваем новый черновик с недавней историей публикаций, а не со
-        всей историей канала, иначе со временем темы неизбежно повторятся
-        (например, раз в год снова пишут про то же исследование).
+        Учитываются любые статусы — опубликованные, ждущие модерации и даже
+        отклонённые. Если бот уже писал на эту тему, повторно предлагать её
+        не надо независимо от того, что ты тогда с ней сделал: отклонённая
+        тема, всплывшая заново через неделю, — это ровно тот же повтор.
+
+        Смотрим только недавнюю историю, а не всю: иначе со временем любая
+        тема окажется "уже была" (раз в год про то же исследование пишут снова).
         """
         cutoff = _to_db(datetime.now(timezone.utc) - timedelta(days=days))
         rows = self.conn.execute(
-            "SELECT text FROM posts WHERE channel_id = ? AND status = ? AND created_at >= ?",
-            (channel_id, POST_PUBLISHED, cutoff),
+            "SELECT text FROM posts WHERE channel_id = ? AND created_at >= ?",
+            (channel_id, cutoff),
         ).fetchall()
         return [row["text"] for row in rows]
 
