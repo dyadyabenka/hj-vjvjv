@@ -168,12 +168,13 @@ def prepare_drafts_for_channel(
     mod_cfg = config.get("moderation", {})
     dup_days = mod_cfg.get("duplicate_check_days", 30)
     dup_threshold = mod_cfg.get("duplicate_similarity_threshold", 0.35)
+    dup_headline_threshold = mod_cfg.get("duplicate_headline_threshold", 0.40)
     fact_check_on = mod_cfg.get("fact_check_enabled", True)
 
     # Опубликованные ранее посты этого канала + те, что создадим в этом же
     # прогоне — второе нужно, чтобы два похожих черновика за один прогон
     # тоже не превратились в два почти одинаковых поста.
-    recent_texts = storage.get_recent_published_texts(channel_cfg["id"], dup_days)
+    recent_texts = storage.get_recent_post_texts(channel_cfg["id"], dup_days)
 
     for index, cluster in enumerate(selected, start=1):
         result = synthesizer.synthesize(
@@ -185,7 +186,7 @@ def prepare_drafts_for_channel(
             continue
         text, articles_block = result
 
-        if is_duplicate_of_recent(text, recent_texts, dup_threshold):
+        if is_duplicate_of_recent(text, recent_texts, dup_threshold, dup_headline_threshold):
             log.info(
                 "[%s] Группа %d: похоже на недавний пост, пропускаем черновик",
                 channel_cfg["id"], index,
@@ -228,7 +229,13 @@ def prepare_drafts_for_channel(
         image_url = None
         image_query = None
         if pexels_key:
-            image_query = images.pick_query(cluster[0].title, fallback_queries)
+            # Сначала спрашиваем модель по СМЫСЛУ ГОТОВОГО ПОСТА; статический
+            # словарь ключевых слов остаётся запасным вариантом на случай
+            # сбоя API — он смотрит только на заголовок исходной статьи и
+            # на незнакомой теме скатывается к общей заглушке канала.
+            image_query = synthesizer.image_query(text) or images.pick_query(
+                cluster[0].title, fallback_queries
+            )
             image_url = images.search_image(image_query, pexels_key, exclude_urls=used_images)
             if image_url:
                 used_images.add(image_url)
