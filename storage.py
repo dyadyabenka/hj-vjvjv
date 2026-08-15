@@ -28,6 +28,10 @@ POST_PENDING = "pending_review"
 POST_PUBLISHED = "published"
 POST_REJECTED = "rejected"
 
+# Режимы модерации канала (см. Storage.get_channel_mode)
+MODE_MANUAL = "manual"  # черновик уходит админу с кнопками, публикация по нажатию
+MODE_AUTO = "auto"      # пост публикуется сразу, админу приходит только уведомление
+
 # Формат дат в базе: фиксированная длина, чтобы строки корректно сравнивались
 _DB_TIME_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 
@@ -67,6 +71,11 @@ CREATE TABLE IF NOT EXISTS style_examples (
     created_at  TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_style_examples_channel ON style_examples (channel_id);
+
+CREATE TABLE IF NOT EXISTS settings (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 """
 
 _NON_WORD_RE = re.compile(r"[^\w\s]", re.UNICODE)
@@ -415,3 +424,34 @@ class Storage:
         )
         self.conn.commit()
         return cursor.rowcount
+
+    # --- настройки (режим модерации каналов и т.п.) ---------------------------
+
+    def get_setting(self, key: str, default: str | None = None) -> str | None:
+        row = self.conn.execute(
+            "SELECT value FROM settings WHERE key = ?", (key,)
+        ).fetchone()
+        return row["value"] if row else default
+
+    def set_setting(self, key: str, value: str) -> None:
+        self.conn.execute(
+            "INSERT INTO settings (key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (key, value),
+        )
+        self.conn.commit()
+
+    def get_channel_mode(self, channel_id: str, default: str = MODE_MANUAL) -> str:
+        """Режим модерации канала: manual (черновик уходит админу с кнопками)
+        или auto (пост публикуется сразу, без ручного подтверждения).
+
+        Хранится в базе, а не в config.yaml, чтобы переключать режим прямо
+        из Telegram без передеплоя.
+        """
+        value = self.get_setting(f"mode:{channel_id}", default)
+        return value if value in (MODE_MANUAL, MODE_AUTO) else default
+
+    def set_channel_mode(self, channel_id: str, mode: str) -> None:
+        if mode not in (MODE_MANUAL, MODE_AUTO):
+            raise ValueError(f"Неизвестный режим: {mode}")
+        self.set_setting(f"mode:{channel_id}", mode)
