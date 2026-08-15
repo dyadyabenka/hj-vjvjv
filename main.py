@@ -19,7 +19,7 @@ from pathlib import Path
 
 import yaml
 from dotenv import load_dotenv
-from telegram import Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -33,7 +33,7 @@ import images
 import publisher
 from clusterer import cluster_articles, is_duplicate_of_recent, rank_clusters
 from fetcher import fetch_for_channel
-from storage import Storage
+from storage import MODE_AUTO, MODE_MANUAL, Storage
 from synthesizer import Synthesizer
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -70,6 +70,14 @@ def get_channel(config: dict, channel_id: str) -> dict | None:
         if channel["id"] == channel_id:
             return channel
     return None
+
+
+def _headline_of(text: str) -> str:
+    """Первая непустая строка поста — для короткого уведомления об автопубликации."""
+    for line in text.strip().split("\n"):
+        if line.strip():
+            return line.strip()
+    return "(без заголовка)"
 
 
 def get_channel_examples(config: dict, storage: Storage, channel_id: str) -> list[str]:
@@ -306,6 +314,44 @@ async def pipeline_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             # плановый прогон и породят дублирующий черновик той же темой.
             storage.mark_processed([a.url for a in draft["cluster"]])
 
+            default_mode = config.get("moderation", {}).get("default_mode", MODE_MANUAL)
+            mode = storage.get_channel_mode(draft["channel_id"], default_mode)
+
+            if mode == MODE_AUTO:
+                # Автоматический режим: публикуем сразу, админу — только
+                # короткое уведомление, чтобы он мог заглянуть в канал,
+                # если захочет. Автопроверки (выдумки, повтор темы) уже
+                # отработали выше — в этом режиме они единственный фильтр.
+                channel_chat_id = secrets["channel_ids"].get(draft["channel_id"], "")
+                published = await publisher.publish_post(
+                    context.bot, channel_chat_id, draft["text"], draft["image_url"], config
+                )
+                if published:
+                    storage.mark_post_published(post_id)
+                    log.info(
+                        "[%s] Пост %d опубликован автоматически", draft["channel_id"], post_id
+                    )
+                    await publisher.notify(
+                        context.bot,
+                        secrets["TELEGRAM_ADMIN_ID"],
+                        f"🤖 Автопубликация в «{draft['channel_name']}»:\n"
+                        f"{_headline_of(draft['text'])}",
+                    )
+                else:
+                    # Публикация не удалась — оставляем пост в pending_review,
+                    # чтобы его можно было вытащить через /pending и разобраться.
+                    log.warning(
+                        "[%s] Автопубликация поста %d не удалась, остаётся в очереди",
+                        draft["channel_id"], post_id,
+                    )
+                    await publisher.notify(
+                        context.bot,
+                        secrets["TELEGRAM_ADMIN_ID"],
+                        f"Не удалось опубликовать пост {post_id} автоматически "
+                        f"(«{draft['channel_name']}»). Смотри лог, пост ждёт в /pending.",
+                    )
+                continue
+
             ok = await publisher.send_draft(
                 context.bot,
                 secrets["TELEGRAM_ADMIN_ID"],
@@ -454,6 +500,102 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         )
 
 
+MODE_LABELS = {MODE_MANUAL: "✋ ручной", MODE_AUTO: "🤖 авто"}
+
+
+def _mode_keyboard(config: dict, storage: Storage) -> InlineKeyboardMarkup:
+    """Клавиатура /mode: по строке на канал + строка массового переключения.
+
+    На кнопке канала показан текущий режим, а нажатие переключает его на
+    противоположный — так не нужно два ряда кнопок на каждый канал.
+    """
+    default_mode = config.get("moderation", {}).get("default_mode", MODE_MANUAL)
+
+    rows = []
+    for ch in config["channels"]:
+        current = storage.get_channel_mode(ch["id"], default_mode)
+        target = MODE_AUTO if current == MODE_MANUAL else MODE_MANUAL
+        rows.append([
+            InlineKeyboardButton(
+                f"{ch['name']}: {MODE_LABELS[current]}",
+                callback_data=f"mode:{ch['id']}:{target}",
+            )
+        ])
+
+    rows.append([
+        InlineKeyboardButton("Все ✋ ручной", callback_data=f"mode:*:{MODE_MANUAL}"),
+        InlineKeyboardButton("Все 🤖 авто", callback_data=f"mode:*:{MODE_AUTO}"),
+    ])
+    return InlineKeyboardMarkup(rows)
+
+
+MODE_HELP = (
+    "Режим модерации по каналам. Нажми на канал, чтобы переключить его.\n\n"
+    "✋ ручной — черновик приходит тебе с кнопками, без твоего нажатия "
+    "ничего не публикуется.\n"
+    "🤖 авто — пост уходит в канал сразу, тебе приходит только уведомление "
+    "о том, что опубликовано.\n\n"
+    "Автопроверка на выдумки и на повтор темы работает в обоих режимах — "
+    "в авто она остаётся единственным фильтром перед публикацией."
+)
+
+
+async def handle_mode_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/mode — показать и переключить режим модерации каждого канала."""
+    admin_id = context.bot_data["secrets"]["TELEGRAM_ADMIN_ID"]
+    if str(update.effective_chat.id) != str(admin_id):
+        return
+
+    config = context.bot_data["config"]
+    with Storage(context.bot_data["db_path"]) as storage:
+        keyboard = _mode_keyboard(config, storage)
+
+    await context.bot.send_message(
+        chat_id=admin_id, text=MODE_HELP, reply_markup=keyboard
+    )
+
+
+async def handle_mode_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Нажатие кнопки в /mode: mode:<channel_id|*>:<manual|auto>."""
+    query = update.callback_query
+    admin_id = context.bot_data["secrets"]["TELEGRAM_ADMIN_ID"]
+
+    if str(update.effective_chat.id) != str(admin_id):
+        await query.answer("Недоступно", show_alert=False)
+        return
+
+    parts = (query.data or "").split(":")
+    if len(parts) != 3:
+        await query.answer()
+        return
+    _, channel_id, mode = parts
+    if mode not in (MODE_MANUAL, MODE_AUTO):
+        await query.answer()
+        return
+
+    config = context.bot_data["config"]
+
+    with Storage(context.bot_data["db_path"]) as storage:
+        if channel_id == "*":
+            for ch in config["channels"]:
+                storage.set_channel_mode(ch["id"], mode)
+            log.info("Все каналы переведены в режим %s", mode)
+        else:
+            if get_channel(config, channel_id) is None:
+                await query.answer()
+                return
+            storage.set_channel_mode(channel_id, mode)
+            log.info("Канал %s переведён в режим %s", channel_id, mode)
+
+        keyboard = _mode_keyboard(config, storage)
+
+    await query.answer(f"Режим: {MODE_LABELS[mode]}")
+    try:
+        await query.edit_message_reply_markup(reply_markup=keyboard)
+    except Exception:  # noqa: BLE001 — если разметка не изменилась, Telegram ругается
+        pass
+
+
 def _channels_list_text(config: dict) -> str:
     return "\n".join(f"• {ch['id']} — {ch['name']}" for ch in config["channels"])
 
@@ -591,10 +733,13 @@ def run_forever(config: dict, secrets: dict, db_path: str) -> None:
     application.bot_data["awaiting_edit_post_id"] = None
     application.bot_data["awaiting_example_channel"] = None
 
+    application.add_handler(CommandHandler("mode", handle_mode_command))
     application.add_handler(CommandHandler("pending", handle_pending_command))
     application.add_handler(CommandHandler("example", handle_example_command))
     application.add_handler(CommandHandler("examples", handle_examples_list_command))
     application.add_handler(CommandHandler("clear_examples", handle_clear_examples_command))
+    # Обработчик кнопок /mode идёт ПЕРЕД общим — у них разный формат callback_data
+    application.add_handler(CallbackQueryHandler(handle_mode_callback, pattern=r"^mode:"))
     application.add_handler(CallbackQueryHandler(handle_callback))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
