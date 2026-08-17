@@ -180,6 +180,11 @@ class Synthesizer:
 
         self.model = cfg["model"]
         self.max_tokens = cfg["max_tokens"]
+        # Последняя ошибка API за прогон. main.py обнуляет её перед прогоном
+        # и, если она появилась, шлёт уведомление в Telegram — иначе сбой
+        # вроде кончившегося баланса виден только в логах сервера, и бот
+        # просто молча перестаёт делать посты.
+        self.last_error: str | None = None
 
         log.info("Синтезатор: провайдер=%s, модель=%s", self.provider, self.model)
 
@@ -271,18 +276,33 @@ class Synthesizer:
         except anthropic.AuthenticationError:
             key_name = "DEEPSEEK_API_KEY" if self.provider == "deepseek" else "ANTHROPIC_API_KEY"
             log.error("Неверный %s — проверь .env", key_name)
+            self.last_error = f"Неверный ключ {key_name} — проверь переменные окружения."
             return None
         except anthropic.RateLimitError:
             # SDK сам делает несколько повторов; сюда попадаем, когда они кончились
             log.error("Лимит запросов к API (%s) исчерпан", self.provider)
+            self.last_error = f"Лимит запросов к API ({self.provider}) исчерпан."
             return None
         except anthropic.APIConnectionError as exc:
             log.error("Нет связи с API (%s): %s", self.provider, exc)
+            self.last_error = f"Нет связи с API ({self.provider})."
             return None
         except anthropic.APIStatusError as exc:
             log.error(
                 "API (%s) вернул ошибку %s: %s", self.provider, exc.status_code, exc.message
             )
+            if exc.status_code == 402:
+                # 402 Payment Required — у DeepSeek это буквально "кончился
+                # баланс". Самая частая причина, по которой бот внезапно
+                # перестаёт создавать посты, поэтому пишем прямым текстом.
+                self.last_error = (
+                    f"Закончился баланс на API ({self.provider}). Посты не создаются, "
+                    f"пока не пополнишь счёт или не переключишь провайдера в config.yaml."
+                )
+            else:
+                self.last_error = (
+                    f"API ({self.provider}) вернул ошибку {exc.status_code}."
+                )
             return None
 
         if response.stop_reason == "refusal":
