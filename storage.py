@@ -12,6 +12,7 @@
 import hashlib
 import json
 import logging
+import os
 import re
 import sqlite3
 from datetime import datetime, timedelta, timezone
@@ -105,6 +106,12 @@ class Storage:
     """Тонкая обёртка над SQLite. Используется как контекстный менеджер."""
 
     def __init__(self, db_path: str):
+        # Файла ещё нет — значит база создаётся с нуля. На Railway это
+        # происходит при каждом деплое, если БД не лежит на Volume, и
+        # вместе с ней теряются режимы каналов (/mode), примеры стиля и
+        # история постов для проверки на повторы. Флаг нужен, чтобы
+        # предупредить об этом в логе и в Telegram.
+        self.created_fresh = not os.path.exists(db_path)
         self.conn = sqlite3.connect(db_path)
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(_SCHEMA)
