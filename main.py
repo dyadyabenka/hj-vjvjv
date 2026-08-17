@@ -288,6 +288,8 @@ async def pipeline_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     db_path = context.bot_data["db_path"]
 
     log.info("=== Плановый прогон конвейера (все каналы) ===")
+    synthesizer.last_error = None
+
     with Storage(db_path) as storage:
         try:
             drafts = prepare_all_drafts(config, storage, synthesizer, secrets)
@@ -297,6 +299,14 @@ async def pipeline_job(context: ContextTypes.DEFAULT_TYPE) -> None:
 
         if not drafts:
             log.info("Новых черновиков нет ни по одному каналу")
+            if synthesizer.last_error:
+                # Молчание бота из-за сбоя API легко принять за "нет новостей",
+                # поэтому о причине сообщаем прямо в Telegram.
+                await publisher.notify(
+                    context.bot,
+                    secrets["TELEGRAM_ADMIN_ID"],
+                    f"⚠️ Посты не создаются. {synthesizer.last_error}",
+                )
             return
 
         for draft in drafts:
@@ -720,6 +730,23 @@ async def handle_pending_command(update: Update, context: ContextTypes.DEFAULT_T
 async def on_startup(application: Application) -> None:
     log.info("Бот запущен, жду планового прогона и модерации")
 
+    db_path = application.bot_data["db_path"]
+    admin_id = application.bot_data["secrets"].get("TELEGRAM_ADMIN_ID")
+    with Storage(db_path) as storage:
+        fresh = storage.created_fresh
+
+    if fresh and admin_id:
+        log.warning("База создана с нуля: режимы каналов и история постов пустые")
+        await publisher.notify(
+            application.bot,
+            admin_id,
+            "⚠️ База данных создана с нуля — режимы каналов сброшены на ручной, "
+            "история постов для проверки на повторы пуста.\n\n"
+            "Если это повторяется после каждого деплоя, база не сохраняется между "
+            "перезапусками: на Railway нужно подключить Volume и указать путь "
+            "в переменной DB_PATH.",
+        )
+
 
 def run_forever(config: dict, secrets: dict, db_path: str) -> None:
     interval_hours = config.get("run", {}).get("interval_hours", 4)
@@ -795,7 +822,10 @@ def main() -> int:
     if secrets is None:
         return 1
 
-    db_path = str(resolve(config["storage"]["db_path"]))
+    # DB_PATH переопределяет путь из config.yaml — так на Railway можно
+    # указать примонтированный Volume (например /app/data/articles.db),
+    # не редактируя конфиг в репозитории.
+    db_path = str(resolve(os.getenv("DB_PATH") or config["storage"]["db_path"]))
 
     if args.dry_run:
         log.info("=== Запуск (dry-run) ===")
